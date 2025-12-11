@@ -1,0 +1,12 @@
+langgraph
+langchain
+langchain_openai
+langchain_anthropic
+langchain_google_genai
+litellm
+ipywidgets>=8.0.0
+python-dotenv
+pyyaml
+pandas
+tqdm
+gradio

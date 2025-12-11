@@ -1,0 +1,13 @@
+# Test Phase: Using DashScope qwen-flash for all models
+judge_model: "qwen-max"
+
+jury_models:
+  - "qwen-max"
+  - "qwen-max"
+  - "qwen-max"
+  - "qwen-max"
+  - "qwen-max"
+
+system_settings:
+  debate_threshold: 15
+  max_debate_rounds: 2
