@@ -161,17 +161,23 @@ class QualificationFlow:
             response = self.llm.generate("qwen-max", [{"role": "user", "content": prompt}])
             data = parse_json_output(response)
             
+            # DEBUG: Print what AI returned
+            print(f"DEBUG AI Response: {data}")
+            
             # Parse New Fields
             status = data.get("status")
             new_phase = data.get("phase", self.current_phase)
             base_score = data.get("base_score")
             # score_delta is DEPRECATED. We calculate it.
-            answer_quality = data.get("answer_quality", "neutral") # pass, fail, neutral
+            answer_quality = data.get("answer_quality", "fail") # pass or fail only
             
             question = data.get("question", "")
             reason = data.get("reason", "")
             difficulty = data.get("difficulty") # Integer 1, 3, 5, 10 for the NEXT question
             self_rating = data.get("self_rating") # Phase 3 extraction
+
+            # DEBUG: Print parsed values
+            print(f"DEBUG: phase={new_phase}, answer_quality={answer_quality}, prev_diff={self.previous_difficulty}, current_score={self.score_accumulator}")
 
             # --- SCORING LOGIC ---
             
@@ -183,23 +189,26 @@ class QualificationFlow:
                         self.score_accumulator = b_score
                         # Log the base score set event
                         self.internal_history.append(f"[System]: Base Score set to {b_score}")
+                        print(f"DEBUG: Base score set to {b_score}")
                 except:
                     pass
 
             # 2. Apply Score Delta based on Previous Question Difficulty
             # We use self.previous_difficulty (set in the LAST turn)
             calculated_delta = 0
-            if self.current_phase == "2" or self.current_phase == "3":
+            if self.current_phase == "2" or self.current_phase == "3" or new_phase == "2" or new_phase == "3":
                  if answer_quality == "pass":
                      calculated_delta = float(self.previous_difficulty)
                  elif answer_quality == "fail":
                      calculated_delta = -float(self.previous_difficulty)
                  # neutral = 0
             
+            print(f"DEBUG: calculated_delta={calculated_delta}")
+            
             if calculated_delta != 0:
                  self.score_accumulator += calculated_delta
                  self.score_accumulator = max(0, min(100, self.score_accumulator))
-                 # self.internal_history.append(f"[System]: Score Delta {calculated_delta} (Prev Diff: {self.previous_difficulty}, Quality: {answer_quality})")
+                 print(f"DEBUG: Score updated to {self.score_accumulator}")
 
             # Update Difficulty for NEXT turn
             if difficulty is not None:

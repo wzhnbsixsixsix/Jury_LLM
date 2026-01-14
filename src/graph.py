@@ -45,6 +45,9 @@ class JuryState(TypedDict):
     human_reason: str
     human_weight: float
     
+    # Evaluation rubrics/criteria (added for Step 2.5)
+    evaluation_rubrics: str
+    
     # {model_id: {score, reason, weight, history: []}}
     model_outputs: Dict[str, Any] 
     
@@ -78,7 +81,13 @@ def node_human_authority(state: JuryState) -> Dict:
 def node_initial_eval(state: JuryState) -> Dict:
     """Parallel evaluation by all jury models."""
     print("--- Node: Initial Evaluation ---")
-    prompt = JURY_EVALUATION_PROMPT.format(topic=state['topic'])
+    
+    # Include rubrics in the evaluation prompt if available
+    rubrics = state.get('evaluation_rubrics', '')
+    if rubrics:
+        prompt = JURY_EVALUATION_PROMPT.format(topic=state['topic']) + f"\n\n# Evaluation Criteria\nPlease use the following criteria to guide your evaluation:\n{rubrics}"
+    else:
+        prompt = JURY_EVALUATION_PROMPT.format(topic=state['topic'])
     
     outputs = state.get('model_outputs', {})
     
