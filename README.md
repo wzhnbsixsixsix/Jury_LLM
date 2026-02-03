@@ -9,7 +9,7 @@ Jury LLM 通过多个不同的大模型组成“评审团”，对给定主题�
 - 可中断流程：在“模型投票前”中断执行，让人类插入投票后再继续。
 
 ## 架构概览
-- 流程框架：使用 LangGraph 定义有条件节点流与中断点。
+- 流程框架：使用 agentscope 定义有条件节点流与中断点。
 - 模型调用：通过 LiteLLM 使用 OpenRouter 路由调用不同模型。
 - 前端交互：提供 Jupyter Notebook `interactive_lab.ipynb`，进行输入、观察辩论日志与匿名投票。
 
@@ -36,7 +36,7 @@ jury-llm/
 └── src/
     ├── __init__.py
     ├── agents.py        # 提示词：人类权威、初评、辩论、盲投、综合报告
-    ├── graph.py         # LangGraph 流程与中断点
+    ├── graph.py         # agentscope 流程与中断点
     ├── llm_provider.py  # OpenRouter/LiteLLM 模型调用封装
     └── utils.py         # 加权计算、辩论触发、匿名化、JSON 解析
 
@@ -106,4 +106,7 @@ jury-llm/
 
 ---
 如需我帮你：可以把最终加权分计算迁移到本地代码、改造初评/投票为并发、或新增一个 CLI 入口，支持在终端运行整个流程。
-        
+
+TODO List:
+
+- [ ] 支持批量输入文本，最终评测结果放到一个csv文件中

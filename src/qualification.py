@@ -37,7 +37,7 @@ class QualificationFlow:
     def get_score(self):
         return self.human_competency_score
 
-    def on_start_interview(self, max_rounds):
+    def on_start_interview(self, max_rounds, self_rating_input=0):
         self.max_rounds = int(max_rounds)
         self.internal_history = []
         self.scores = []
@@ -48,7 +48,6 @@ class QualificationFlow:
         # Reset new state
         self.current_phase = "1"
         self.score_accumulator = 0.0
-        self.score_accumulator = 0.0
         self.score_history = []
         self.asked_questions = []
         self.previous_difficulty = 0
@@ -56,6 +55,16 @@ class QualificationFlow:
         if not self.target_text:
             return [{"role": "assistant", "content": "❌ Error: No Target Text found. Please complete Step 1 first."}], gr.update(interactive=False)
             
+        # Check for Self-Rating Skip
+        if self_rating_input and float(self_rating_input) > 0:
+            score = float(self_rating_input)
+            self.human_competency_score = score
+            self.reason = "User self-rated via Step 2 override."
+            self.score_accumulator = score
+            
+            print(f"DEBUG: Skipping interview via self-rating: {score}")
+            return [{"role": "assistant", "content": f"✅ Assessment Skipped (Self-Rating).\n**Score:** {score}\n**Reason:** {self.reason}"}], gr.update(interactive=False)
+
         print(f"DEBUG: Starting Interview. Target Text ({len(self.target_text)} chars): {self.target_text[:50]}...")
 
         try:
