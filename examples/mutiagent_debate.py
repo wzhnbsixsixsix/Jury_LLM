@@ -1,7 +1,13 @@
 # -*- coding: utf-8 -*-
 """The multi-agent debate workflow example in AgentScope."""
+
 import asyncio
 import os
+import sys
+from pathlib import Path
+
+# Add parent directory to Python path to import src modules
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from pydantic import (
     BaseModel,
@@ -16,6 +22,7 @@ from agentscope.formatter import (
 from agentscope.message import Msg
 from agentscope.model import DashScopeChatModel
 from agentscope.pipeline import MsgHub
+from src.config import ModelConfig
 
 topic = (
     "The two circles are externally tangent and there is no relative sliding. "
@@ -28,6 +35,7 @@ topic = (
 # Create two debater agents, Alice and Bob, who will discuss the topic.
 def create_solver_agent(name: str) -> ReActAgent:
     """Get a solver agent."""
+    model_config = ModelConfig()
     return ReActAgent(
         name=name,
         sys_prompt=f"You're a debater named {name}. Hello and welcome to the "
@@ -36,7 +44,7 @@ def create_solver_agent(name: str) -> ReActAgent:
         "find the correct answer. The debate topic is stated as "
         f"follows: {topic}. Use Chinese to answer the question",
         model=DashScopeChatModel(
-            model_name="qwen-max",
+            model_name=model_config.get_default_model(),
             api_key=os.environ["DASHSCOPE_API_KEY"],
             stream=True,
         ),
@@ -47,6 +55,7 @@ def create_solver_agent(name: str) -> ReActAgent:
 alice, bob = [create_solver_agent(name) for name in ["Alice", "Bob"]]
 
 # Create a moderator agent
+model_config = ModelConfig()
 moderator = ReActAgent(
     name="Aggregator",
     sys_prompt=(
@@ -60,7 +69,7 @@ moderator = ReActAgent(
         "and decide which one is correct."
     ),
     model=DashScopeChatModel(
-        model_name="qwen-max",
+        model_name=model_config.get_default_model(),
         api_key=os.environ["DASHSCOPE_API_KEY"],
         stream=True,
     ),
@@ -91,8 +100,7 @@ async def run_multiagent_debate() -> None:
             await alice(
                 Msg(
                     "user",
-                    "You are affirmative side, Please express your "
-                    "viewpoints.",
+                    "You are affirmative side, Please express your viewpoints.",
                     "user",
                 ),
             )

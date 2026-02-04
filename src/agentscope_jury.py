@@ -34,6 +34,8 @@ from agentscope.message import Msg
 from agentscope.model import DashScopeChatModel
 from agentscope.pipeline import MsgHub
 
+from .config import ModelConfig
+
 
 # ============================================================================
 # SECTION 1: System Prompts
@@ -521,8 +523,9 @@ class JuryEvaluationSystem:
             "max_debate_rounds", 1
         )
 
-        # 模型配置
-        self.model_name = config.get("judge_model", "qwen-max")
+        # 模型配置 - 使用中央配置管理
+        model_config = ModelConfig()
+        self.model_name = config.get("judge_model", model_config.get_judge_model())
 
         # 初始化AgentScope
         studio_url = os.getenv("AGENTSCOPE_STUDIO_URL", "http://localhost:3000")
@@ -539,11 +542,13 @@ class JuryEvaluationSystem:
         """创建4个专业法官和首席法官"""
 
         api_key = os.environ.get("DASHSCOPE_API_KEY", "")
+        model_config = ModelConfig()
 
-        # 创建模型实例的辅助函数
-        def create_model():
+        # 创建模型实例的辅助函数，支持按角色指定不同模型
+        def create_model(role: str = None):
+            model_name = model_config.get_judge_model(role) if role else self.model_name
             return DashScopeChatModel(
-                model_name=self.model_name,
+                model_name=model_name,
                 api_key=api_key,
                 stream=True,
             )
@@ -552,28 +557,28 @@ class JuryEvaluationSystem:
         self.judge_logic = ReActAgent(
             name="Logic_Judge",
             sys_prompt=SYS_PROMPT_LOGIC,
-            model=create_model(),
+            model=create_model("logic"),
             formatter=DashScopeChatFormatter(),
         )
 
         self.judge_expression = ReActAgent(
             name="Expression_Judge",
             sys_prompt=SYS_PROMPT_EXPRESSION,
-            model=create_model(),
+            model=create_model("expression"),
             formatter=DashScopeChatFormatter(),
         )
 
         self.judge_utility = ReActAgent(
             name="Utility_Judge",
             sys_prompt=SYS_PROMPT_UTILITY,
-            model=create_model(),
+            model=create_model("utility"),
             formatter=DashScopeChatFormatter(),
         )
 
         self.judge_moral = ReActAgent(
             name="Moral_Judge",
             sys_prompt=SYS_PROMPT_MORAL,
-            model=create_model(),
+            model=create_model("moral"),
             formatter=DashScopeChatFormatter(),
         )
 
@@ -581,7 +586,7 @@ class JuryEvaluationSystem:
         self.chief = ReActAgent(
             name="Chief_Justice",
             sys_prompt=SYS_PROMPT_CHIEF,
-            model=create_model(),
+            model=create_model("chief"),
             formatter=DashScopeMultiAgentFormatter(),
         )
 
@@ -600,7 +605,14 @@ class JuryEvaluationSystem:
             "Moral": "Moral Judge",
         }
 
+        # 打印模型配置信息
+        judge_models = model_config.get_all_jury_models()
         print(f"✅ Created {len(self.all_judges)} specialized judges + Chief Justice")
+        print(
+            f"   Logic: {judge_models['logic']}, Expression: {judge_models['expression']}"
+        )
+        print(f"   Utility: {judge_models['utility']}, Moral: {judge_models['moral']}")
+        print(f"   Chief: {judge_models['chief']}")
 
     async def run(self, context: EvaluationContext) -> JuryState:
         """
@@ -826,7 +838,7 @@ class JuryEvaluationSystem:
         )
 
         # 发起方先陈述
-        with MsgHub(participants=[initiator, target]) as hub:
+        async with MsgHub(participants=[initiator, target]) as hub:
             # 发起方陈述
             init_response = await initiator(Msg("user", initiator_prompt, "user"))
             init_content = (
@@ -1261,8 +1273,9 @@ def create_jury_system(config_path: Optional[str] = None) -> JuryEvaluationSyste
         with open(config_path, "r") as f:
             config = yaml.safe_load(f)
     else:
+        model_config = ModelConfig()
         config = {
-            "judge_model": "qwen-max",
+            "judge_model": model_config.get_judge_model(),
             "system_settings": {
                 "debate_threshold": 15,
                 "max_debate_rounds": 1,
@@ -1297,8 +1310,9 @@ async def run_evaluation(
         JuryState: 评估结果
     """
     if config is None:
+        model_config = ModelConfig()
         config = {
-            "judge_model": "qwen-max",
+            "judge_model": model_config.get_judge_model(),
             "system_settings": {
                 "debate_threshold": 15,
                 "max_debate_rounds": 1,
@@ -1335,8 +1349,9 @@ if __name__ == "__main__":
             human_reason="我认为这段文本质量不错",
         )
 
+        model_config = ModelConfig()
         config = {
-            "judge_model": "qwen-max",
+            "judge_model": model_config.get_judge_model(),
             "system_settings": {
                 "debate_threshold": 15,
                 "max_debate_rounds": 1,

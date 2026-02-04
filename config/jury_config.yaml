@@ -1,13 +1,47 @@
-# Test Phase: Using DashScope qwen-flash for all models
-judge_model: "qwen-max"
+# Jury LLM 模型配置文件
+# 支持两种配置方式：
+# 1. 按角色名称配置（推荐） - 使用 judge_models
+# 2. 按索引配置（向后兼容） - 使用 jury_models
 
-jury_models:
-  - "qwen-max"
-  - "qwen-max"
-  - "qwen-max"
-  - "qwen-max"
-  - "qwen-max"
+# ============================================================================
+# 方式 1: 按角色名称配置（推荐）
+# ============================================================================
+# 为每个评委角色指定独立的模型
+judge_models:
+  chief: "qwen-turbo"        # 首席法官
+  logic: "qwen-turbo"        # 逻辑评委
+  expression: "qwen-turbo"   # 表达评委
+  utility: "qwen-turbo"      # 实用评委
+  moral: "qwen-turbo"        # 道德评委
 
+# ============================================================================
+# 方式 2: 按索引配置（向后兼容，如果 judge_models 未配置则使用）
+# ============================================================================
+judge_model: "qwen-turbo"  # 首席法官模型（legacy）
+
+jury_models:  # 按顺序：logic, expression, utility, moral
+  - "qwen-turbo"      # 逻辑评委
+  - "qwen-turbo"      # 表达评委
+  - "qwen-turbo"      # 实用评委
+  - "qwen-turbo"      # 道德评委
+
+# ============================================================================
+# 系统设置
+# ============================================================================
 system_settings:
-  debate_threshold: 15
-  max_debate_rounds: 2
+  debate_threshold: 15      # 触发辩论的分数差异阈值
+  turbo_debate_rounds: 2      # 最大辩论轮次
+
+# ============================================================================
+# 模型配置设置（可选）
+# ============================================================================
+model_settings:
+  # 默认模型（当未指定角色时使用），step2和step2.5都是用的这个
+  default_model: "qwen-turbo"
+  
+  # 提供商特定的模型映射（可选）
+  # 用于快速切换不同 AI 提供商
+  # provider_models:
+  #   openrouter: "anthropic/claude-3.5-sonnet"
+  #   dashscope: "qwen-turbo"
+  #   openai: "gpt-4"
