@@ -207,21 +207,19 @@ jury-llm/
 
 ## Agent设计
 
-> - 有多个投票法官，他们的角色设定不同，比如有的法官只关心事实逻辑，有的只关心表达像不像人类，有的关心目标完成度等，有的关心伦理
->
 > - 1.有多个投票法官，他们的角色设定不同，比如有的法官只关心事实逻辑，有的只关心表达像不像人类，有的关心目标完成度等，有的关心伦理等
 >
 >   所有的投票法官可以参考(但不强制)Step2.5设计好的Rubric进行按点评分
 >
 >   2.有个仲裁法官
 >
->   
+> 
 >
->   只做三件事：
+>     只做三件事：
 >
->   
+> 
 >
->   汇总各法官意见
+>     汇总各法官意见
 >
 >   标注冲突点
 >
@@ -243,29 +241,37 @@ jury-llm/
 
 所有 Agent 均挂载 `Tavily Search Tool` 以进行事实核查。
 
-| Agent ID    | 角色名                 | 职责描述                                                     | 典型模型配置                 |
-| ----------- | ---------------------- | ------------------------------------------------------------ | ---------------------------- |
-| **User**    | **Human Plaintiff**    | 人类用户。提供输入、个人偏好、打分及最终盲投。               | `UserAgent`                  |
-| **Arch**    | **Rubric Architect**   | **标准制定者**。在评测开始前，根据 Topic 制定具体的评分细则（Rubric）。 | GPT-4o / Claude 3.5          |
-| **Judge_L** | **Logic & Fact Judge** | **逻辑与事实法官**。只关注逻辑漏洞、幻觉、事实准确性。*（重度使用 Search）* | GPT-4-Turbo / Gemini 1.5 Pro |
-| **Judge_E** | **Expression Judge**   | **表达与拟人法官**。关注语气、共情能力、是否像 AI 味太重。   | Claude 3.5 Sonnet            |
-| **Judge_U** | **Utility Judge**      | **效用法官**。关注指令遵循度、是否解决了问题、格式是否正确。 | Llama-3-70b / Mistral Large  |
-| **Judge_M** | **Moral/Safety Judge** | **伦理法官**。关注偏见、安全、政治正确。                     | GPT-4o                       |
-| **Chief**   | **Chief Justice**      | **首席大法官/仲裁者**。汇总意见、主持辩论、判定冲突、撰写最终报告。 | 最强模型 (GPT-4o)            |
-
-导出到 Google 表格
+| Agent ID    | 角色名                 | 职责描述                                                     | 典型模型配置 |
+| ----------- | ---------------------- | ------------------------------------------------------------ | ------------ |
+| **User**    | **Human Plaintiff**    | 人类用户。提供输入、个人偏好、打分及最终盲投。               | `UserAgent`  |
+| **Arch**    | **Rubric Architect**   | **标准制定者**。在评测开始前，根据 Topic 制定具体的评分细则（Rubric）。如果在step2.5中已经有规则定义了，则不设立这个agent |              |
+| **Judge_L** | **Logic & Fact Judge** | **逻辑与事实法官**。只关注逻辑漏洞、幻觉、事实准确性。*（重度使用 Search）* |              |
+| **Judge_E** | **Expression Judge**   | **表达与拟人法官**。关注语气、共情能力、是否像 AI 味太重。   |              |
+| **Judge_U** | **Utility Judge**      | **效用法官**。关注指令遵循度、是否解决了问题、格式是否正确。 |              |
+| **Judge_M** | **Moral/Safety Judge** | **伦理法官**。关注偏见、安全、政治正确。                     |              |
+| **Chief**   | **Chief Justice**      | **首席大法官/仲裁者**。汇总意见、主持辩论、判定冲突、撰写最终报告。 |              |
 
 ------
 
 #### 2. 核心工作流 (The Pipeline)
 
-基于 AgentScope 的 Pipeline 设计如下：
-
-Plaintext
+获取
 
 ```
-Input -> [Rubric Gen] -> [Parallel Jury Eval] -> [Debate Check] -> (Optional Debate) -> [Anonymous Vote] -> [Synthesis] -> Output
+# Step 1	TARGET_TEXT	目标文本 [Must]
+# Step 1	EVALUATION_PURPOSE	评估目的 [Must]
+# Step 2	HUMAN_COMPETENCY_SCORE	能力评分
+# Step 2	QUALIFICATION_HISTORY	资格历史 [Optional]
+# Step 2.5	EVALUATION_RUBRICS	评估标准 [Optional，只做参考，而不是严格执行]\
 ```
+
+基于 AgentScope 的 Pipeline 设计如下：(最重要)
+
+```Plaintext
+获取之前阶段拿到的数据 -> 判断是否有EVALUATION_RUBRICS，有的话就用，没有的话就靠内部->传给每个Agent 1.TARGET_TEXT 2.EVALUATION_PURPOSE 3.EVALUATION_RUBRICS-> 输出json打分信息到MsgHub(agentscope.pipeline)中 -> chief提出是否有人想发起debate，按照特定格式，比如A 发起debate to b，然后加入到一个队列中，然后再开一个只有包含chief三个人的MsgHub进行debate，然后把debate结果输出json(两份打分+debate过程的理由) ->debate结束->匿名投票一个最好的reason，加大权重->报告计算分数输出，并且查看所有的reason，给一份综合的报告  -> Output
+```
+
+# （以下的内容只是参考）
 
 #### 详细流程设计：
 
@@ -293,12 +299,8 @@ Input -> [Rubric Gen] -> [Parallel Jury Eval] -> [Debate Check] -> (Optional Deb
 
 **Step 4: 对抗性辩论 (Adversarial Debate - Conditional)**
 
-- **触发条件**：如果 Step 3 判定冲突 > 阈值。
-- **机制**：**“原告与被告”模式**。
-  - 选取打分**最高**的 Agent 和打分**最低**的 Agent。
-  - **Round 1**：低分方发起攻击（列举缺陷）。
-  - **Round 2**：高分方进行辩护（反驳或承认）。
-  - **Round 3**：**Chief Justice** 进行仲裁，判定谁的理由更站得住脚，并给出一个**“修正系数”**。
+- **触发条件**：如果 某个法官想要发起辩论，可以输出一个辩论的请求
+- **机制**：然后A法官和B法官进行1轮辩论，辩论出结果就可以修改个字的分数和reason，如果没有结果可以保持原判
 
 **Step 5: 盲眼投票 (Blind Voting)**
 
