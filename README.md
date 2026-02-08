@@ -636,3 +636,36 @@ human_user = UserAgent(name="Human_Plaintiff")
 - **模型输出非 JSON**：`utils.parse_json_output` 会尝试清理代码块并解析；必要时增加重试或改进提示词
 - **超时与速率限制**：多模型调用可能触发限流，建议减少并发或调整模型数量
 
+## 函数嵌套关系总结
+
+```
+JuryEvaluationSystem.__init__()
+├── _create_judges()
+
+JuryEvaluationSystem.run()
+├── run_initial_evaluation()
+│   ├── build_evaluation_prompt()
+│   ├── judge(Msg(...))
+│   └── parse_json_from_response()
+│
+├── check_and_run_debates()
+│   └── _run_single_debate()
+│       ├── build_debate_prompt()
+│       ├── MsgHub(...)
+│       │   ├── initiator(Msg(...))
+│       │   └── target(Msg(...))
+│       └── parse_json_from_response()
+│
+├── _apply_debate_results()
+├── _prepare_voting_options()
+├── run_anonymous_voting()
+│   ├── UserAgent(...)/judge(Msg(...))
+│   ├── parse_json_from_response()
+│   └── _normalize_vote()
+│
+├── _calculate_weights()
+├── _calculate_final_score()
+└── generate_final_report()
+    ├── chief(Msg(...))
+    └── parse response
+```

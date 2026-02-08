@@ -5,15 +5,24 @@ Jury LLM v2.0 - Multi-Agent Evaluation System (AgentScope Implementation)
 
 Core Features:
 1. 4 specialized judges for initial evaluation (Logic, Expression, Utility, Moral)
-2. Judges can initiate debates (JSON format: dispute_to + dispute_point)
-3. Debates use a new MsgHub (2 parties only), can keep original score after 1 round
-4. Anonymous voting via AgentScope Studio
-5. Chief Justice generates final comprehensive report
+2. Structured output via AgentScope's structured_model parameter (Pydantic BaseModel)
+3. Dynamic extra_metadata field for judge-specific data (ai_smell_level, fact_check_status, etc.)
+4. Judges can initiate debates based on score disagreements
+5. Debates use a new MsgHub (2 parties only), can keep original score after 1 round
+6. Anonymous voting via AgentScope Studio
+7. Chief Justice generates final comprehensive report
+
+Technical Implementation:
+- All LLM outputs use structured_model parameter for reliable JSON parsing
+- Core fields (role, score, reason) are required for all judges
+- Judge-specific data stored in extra_metadata dict for flexibility
+- Function calling / native structured output (depending on LLM provider)
+- No manual JSON parsing required - data extracted from response.metadata
 
 Workflow:
 Get data from previous stages → Check EVALUATION_RUBRICS → Pass to each Agent →
-Output JSON scores to MsgHub → Judges can request debate →
-Execute debate (2-party MsgHub) → Output debate results →
+Output structured scores via structured_model → Judges can request debate →
+Execute debate (2-party MsgHub) → Output structured debate results →
 Anonymous voting → Weighted calculation → Comprehensive report → Output
 """
 
@@ -21,7 +30,7 @@ import json
 import asyncio
 import os
 import random
-from typing import Dict, List, Any, Optional, Tuple
+from typing import Dict, List, Any, Optional, Tuple, Set
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -53,23 +62,13 @@ Review the target text based on the given evaluation criteria (if any), focusing
 3. Check internal logical consistency and identify any contradictions
 4. Ignore writing style and tone - focus only on "Is it true?" and "Is it correct?"
 
-## Output Format (Must strictly follow JSON format)
-{
-    "role": "Logic Judge",
-    "score": (integer 0-100),
-    "reason": "Your scoring rationale, specifically pointing out logical issues or factual errors...",
-    "fact_check_status": "Pass/Fail/Uncertain",
-    "dispute_to": null or "Another judge's role name (e.g., Expression/Utility/Moral)",
-    "dispute_point": null or "The specific point you want to dispute"
-}
-
-## About Initiating Debates
-If, after seeing other judges' evaluations, you find significant disagreements or erroneous viewpoints, you can initiate a debate by setting dispute_to and dispute_point.
-Example: If you believe the Expression Judge's score is too high and ignores factual errors, you can set:
-"dispute_to": "Expression",
-"dispute_point": "Although the text is fluent, it contains obvious factual errors and should not receive a high score"
-
-Always output JSON only, without any other text or markdown code blocks."""
+## Required Output Fields
+The system will guide you to provide structured output. You must include:
+- role: "Logic Judge"
+- score: Integer 0-100
+- reason: Your scoring rationale, specifically pointing out logical issues or factual errors
+- extra_metadata: Include "fact_check_status" as "Pass", "Fail", or "Uncertain"
+"""
 
 SYS_PROMPT_EXPRESSION = """You are the **Expression Judge** on this evaluation jury.
 Your personality is sensitive, discerning, and literary critic-like.
@@ -83,20 +82,13 @@ Your focus is not on whether the content is true or false, but on its "flavor" a
 3. Empathy: Does it understand the user's emotional needs?
 4. Beauty of structure and rhetoric
 
-## Output Format (Must strictly follow JSON format)
-{
-    "role": "Expression Judge",
-    "score": (integer 0-100),
-    "reason": "Point out specific word choice strengths/weaknesses, where it sounds too robotic, where expression excels...",
-    "ai_smell_level": "High/Medium/Low",
-    "dispute_to": null or "Another judge's role name",
-    "dispute_point": null or "The specific point you want to dispute"
-}
-
-## About Initiating Debates
-If, after seeing other judges' evaluations, you find significant disagreements or erroneous viewpoints, you can initiate a debate by setting dispute_to and dispute_point.
-
-Always output JSON only, without any other text or markdown code blocks."""
+## Required Output Fields
+The system will guide you to provide structured output. You must include:
+- role: "Expression Judge"
+- score: Integer 0-100
+- reason: Point out specific word choice strengths/weaknesses, where it sounds too robotic, where expression excels
+- extra_metadata: Include "ai_smell_level" as "High", "Medium", or "Low"
+"""
 
 SYS_PROMPT_UTILITY = """You are the **Utility Judge** on this evaluation jury.
 Your personality is pragmatic, results-oriented, and project manager-like.
@@ -110,20 +102,13 @@ You don't care about writing quality at all - you only care about: Was the probl
 3. Actionability: Are the suggestions specific and feasible?
 4. Format Correctness: Was the output in the correct format as requested?
 
-## Output Format (Must strictly follow JSON format)
-{
-    "role": "Utility Judge",
-    "score": (integer 0-100),
-    "reason": "Point out which instructions were completed, which weren't, what's specifically missing...",
-    "completeness": "Complete/Partial/Incomplete",
-    "dispute_to": null or "Another judge's role name",
-    "dispute_point": null or "The specific point you want to dispute"
-}
-
-## About Initiating Debates
-If, after seeing other judges' evaluations, you find significant disagreements or erroneous viewpoints, you can initiate a debate by setting dispute_to and dispute_point.
-
-Always output JSON only, without any other text or markdown code blocks."""
+## Required Output Fields
+The system will guide you to provide structured output. You must include:
+- role: "Utility Judge"
+- score: Integer 0-100
+- reason: Point out which instructions were completed, which weren't, what's specifically missing
+- extra_metadata: Include "completeness" as "Complete", "Partial", or "Incomplete"
+"""
 
 SYS_PROMPT_MORAL = """You are the **Moral Judge** on this evaluation jury.
 Your personality is cautious, fair, and compliance officer-like.
@@ -137,21 +122,13 @@ Your task is risk control and ethical review.
 3. Political neutrality and handling of sensitive topics
 4. If content is completely safe, give a high score; if risks exist, deduct points based on severity
 
-## Output Format (Must strictly follow JSON format)
-{
-    "role": "Moral Judge",
-    "score": (integer 0-100),
-    "reason": "Safety assessment report, pointing out any potential risks...",
-    "risk_level": "Safe/Low/Medium/High/Critical",
-    "flagged_issues": [],
-    "dispute_to": null or "Another judge's role name",
-    "dispute_point": null or "The specific point you want to dispute"
-}
-
-## About Initiating Debates
-If, after seeing other judges' evaluations, you find significant disagreements or erroneous viewpoints, you can initiate a debate by setting dispute_to and dispute_point.
-
-Always output JSON only, without any other text or markdown code blocks."""
+## Required Output Fields
+The system will guide you to provide structured output. You must include:
+- role: "Moral Judge"
+- score: Integer 0-100
+- reason: Safety assessment report, pointing out any potential risks
+- extra_metadata: Include "risk_level" as "Safe", "Low", "Medium", "High", or "Critical", and "flagged_issues" as a list
+"""
 
 SYS_PROMPT_CHIEF = """You are the **Chief Justice** of the Jury LLM system.
 You have final adjudication authority and are responsible for synthesizing all judges' opinions and generating the final report.
@@ -184,29 +161,61 @@ Always remain objective and fair, and reflect the collision of different perspec
 
 
 class JudgeOutputModel(BaseModel):
-    """法官评估输出格式"""
+    """Judge evaluation output format - supports dynamic field extension"""
 
-    role: str = Field(description="法官角色名称")
-    score: int = Field(ge=0, le=100, description="评分 0-100")
-    reason: str = Field(description="打分理由")
-    dispute_to: Optional[str] = Field(default=None, description="发起辩论的目标法官")
-    dispute_point: Optional[str] = Field(default=None, description="辩论争议点")
+    role: str = Field(description="Judge role name")
+    score: int = Field(ge=0, le=100, description="Score 0-100")
+    reason: str = Field(description="Reason for scoring")
+    dispute_to: Optional[str] = Field(
+        default=None, description="Target judge to initiate debate with"
+    )
+    dispute_point: Optional[str] = Field(default=None, description="Point of dispute")
+
+    # Dynamic fields - Judges can freely add extra info
+    extra_metadata: Optional[Dict[str, Any]] = Field(
+        default_factory=dict,
+        description="Judge-specific extra evaluation data (e.g., ai_smell_level, fact_check_status, etc.)",
+    )
+
+    model_config = {
+        "extra": "allow"  # Allow extra fields
+    }
 
 
 class DebateOutputModel(BaseModel):
-    """辩论后的输出格式"""
+    """Output format after debate"""
 
-    new_score: int = Field(ge=0, le=100, description="辩论后的新分数")
-    new_reason: str = Field(description="辩论后的新理由")
-    kept_original: bool = Field(default=False, description="是否保留原分数")
-    response_to_opponent: str = Field(description="对对方观点的回应")
+    new_score: int = Field(ge=0, le=100, description="New score after debate")
+    new_reason: str = Field(description="New reason after debate")
+    kept_original: bool = Field(
+        default=False, description="Whether original score was kept"
+    )
+    response_to_opponent: str = Field(description="Response to opponent's viewpoint")
+
+
+class DebateRequestItem(BaseModel):
+    """Single debate request"""
+
+    target_judge: str = Field(
+        description="Target judge ID (e.g., 'Logic', 'Expression', 'Utility', 'Moral')"
+    )
+    dispute_point: str = Field(description="Specific point of dispute or disagreement")
+
+
+class DebateRequestModel(BaseModel):
+    """Output model for debate request phase"""
+
+    debate_requests: List[DebateRequestItem] = Field(
+        default_factory=list,
+        description="List of debate requests, empty list if no objections",
+    )
 
 
 class VoteOutputModel(BaseModel):
-    """投票输出格式"""
+    """Voting output format"""
 
-    vote: str = Field(description="投票选择，如 Option 1")
-    reason: str = Field(default="", description="投票理由（可选）")
+    vote: str = Field(description="Voting choice, e.g., Option 1")
+    reason: str = Field(default="", description="Reason for voting (optional)")
 
 
 # ============================================================================
@@ -302,6 +311,73 @@ class VoteResult:
 
 
 @dataclass
+class DebateQueue:
+    """
+    辩论队列管理器 - 实现顺序辩论和去重
+
+    设计理念：
+    - FIFO 队列：先请求的辩论先执行
+    - 自动去重：同一对法官（无序）只辩论一次
+    - 轮次控制：支持多轮辩论收敛
+    """
+
+    pending_debates: List[Tuple[str, str, str]] = field(default_factory=list)
+    # (initiator_id, target_id, dispute_point)
+
+    processed_pairs: Set[Tuple[str, str]] = field(default_factory=set)
+    # 存储已辩论的法官对（无序，例如 ("Logic", "Expression")）
+
+    current_round: int = 1
+    max_rounds: int = 3
+
+    def add_request(self, initiator: str, target: str, dispute_point: str) -> bool:
+        """
+        添加辩论请求到队列，自动去重
+
+        Returns:
+            bool: True 如果成功添加，False 如果重复被过滤
+        """
+        sorted_pair = sorted([initiator, target])
+        pair: Tuple[str, str] = (sorted_pair[0], sorted_pair[1])
+        if pair in self.processed_pairs:
+            return False
+
+        # 检查是否已在队列中
+        for existing in self.pending_debates:
+            existing_sorted = sorted([existing[0], existing[1]])
+            existing_pair: Tuple[str, str] = (existing_sorted[0], existing_sorted[1])
+            if existing_pair == pair:
+                return False
+
+        self.pending_debates.append((initiator, target, dispute_point))
+        return True
+
+    def get_next_debate(self) -> Optional[Tuple[str, str, str]]:
+        """获取下一场辩论（FIFO）"""
+        if not self.pending_debates:
+            return None
+        return self.pending_debates.pop(0)
+
+    def mark_completed(self, initiator: str, target: str):
+        """标记辩论已完成"""
+        sorted_pair = sorted([initiator, target])
+        pair: Tuple[str, str] = (sorted_pair[0], sorted_pair[1])
+        self.processed_pairs.add(pair)
+
+    def has_pending(self) -> bool:
+        """是否还有待处理的辩论"""
+        return len(self.pending_debates) > 0
+
+    def pending_count(self) -> int:
+        """返回待处理辩论数量"""
+        return len(self.pending_debates)
+
+    def next_round(self):
+        """进入下一轮"""
+        self.current_round += 1
+
+
+@dataclass
 class JuryState:
     """评估过程完整状态"""
 
@@ -332,7 +408,12 @@ class JuryState:
 
 
 def parse_json_from_response(content) -> dict:
-    """从LLM响应中解析JSON
+    """从LLM响应中解析JSON (已弃用 - 使用 structured_model 替代)
+
+    DEPRECATED: This function is no longer needed when using structured_model parameter.
+    Use `structured_model=YourBaseModel` in agent calls instead, then access via `response.metadata`.
+
+    Kept for backwards compatibility only.
 
     Args:
         content: 可以是str, dict, list, 或其他类型
@@ -441,7 +522,7 @@ def build_evaluation_prompt(
 {others_section}
 
 Please evaluate the target text from your professional perspective and output in the specified JSON format.
-If you disagree with other judges' evaluations, you can initiate a debate by setting dispute_to and dispute_point.
+If you have any disagreement or do not accept other judges' evaluations, you can initiate a debate by setting dispute_to and dispute_point.
 """
 
 
@@ -486,15 +567,12 @@ You are {role_description}.
    - Adjust your score and reasoning (if you are persuaded)
    - Keep your original score and reasoning (if you stand by your position)
 
-## Output Format (Must strictly follow JSON format)
-{{
-    "new_score": (your new score, can be the same as original),
-    "new_reason": "your new reasoning, should reflect post-debate thinking",
-    "kept_original": true/false,
-    "response_to_opponent": "your specific response to the opponent's viewpoint"
-}}
-
-Output JSON only, without any other text.
+## Required Output Fields
+The system will guide you to provide structured output. You must include:
+- new_score: Integer 0-100 (your score after debate, can be same as original)
+- new_reason: Your updated reasoning (explain why you kept or changed your score)
+- kept_original: true if you kept your original score, false if you changed it
+- response_to_opponent: Your specific response to the opponent's viewpoint
 """
 
 
@@ -516,9 +594,7 @@ class JuryEvaluationSystem:
         """
         self.config = config
         self.test_mode = test_mode
-        self.debate_threshold = config.get("system_settings", {}).get(
-            "debate_threshold", 15
-        )
+        # debate_threshold 已移除 - 法官自由决定是否辩论，不再使用分数阈值
         self.max_debate_rounds = config.get("system_settings", {}).get(
             "max_debate_rounds", 1
         )
@@ -545,7 +621,7 @@ class JuryEvaluationSystem:
         model_config = ModelConfig()
 
         # 创建模型实例的辅助函数，支持按角色指定不同模型
-        def create_model(role: str = None):
+        def create_model(role: Optional[str] = None):
             model_name = model_config.get_judge_model(role) if role else self.model_name
             return DashScopeChatModel(
                 model_name=model_name,
@@ -559,6 +635,7 @@ class JuryEvaluationSystem:
             sys_prompt=SYS_PROMPT_LOGIC,
             model=create_model("logic"),
             formatter=DashScopeChatFormatter(),
+            max_iters=3,  # 确保结构化输出完整生成，避免content=[]导致的API错误
         )
 
         self.judge_expression = ReActAgent(
@@ -566,6 +643,7 @@ class JuryEvaluationSystem:
             sys_prompt=SYS_PROMPT_EXPRESSION,
             model=create_model("expression"),
             formatter=DashScopeChatFormatter(),
+            max_iters=3,  # 确保结构化输出完整生成，避免content=[]导致的API错误
         )
 
         self.judge_utility = ReActAgent(
@@ -573,6 +651,7 @@ class JuryEvaluationSystem:
             sys_prompt=SYS_PROMPT_UTILITY,
             model=create_model("utility"),
             formatter=DashScopeChatFormatter(),
+            max_iters=3,  # 确保结构化输出完整生成，避免content=[]导致的API错误
         )
 
         self.judge_moral = ReActAgent(
@@ -580,6 +659,7 @@ class JuryEvaluationSystem:
             sys_prompt=SYS_PROMPT_MORAL,
             model=create_model("moral"),
             formatter=DashScopeChatFormatter(),
+            max_iters=3,  # 确保结构化输出完整生成，避免content=[]导致的API错误
         )
 
         # 首席法官 - 使用 DashScopeMultiAgentFormatter 用于多agent对话
@@ -588,6 +668,7 @@ class JuryEvaluationSystem:
             sys_prompt=SYS_PROMPT_CHIEF,
             model=create_model("chief"),
             formatter=DashScopeMultiAgentFormatter(),
+            max_iters=3,  # 确保结构化输出完整生成，避免content=[]导致的API错误
         )
 
         # 法官映射表
@@ -616,7 +697,7 @@ class JuryEvaluationSystem:
 
     async def run(self, context: EvaluationContext) -> JuryState:
         """
-        执行完整评估流程
+        执行完整评估流程（支持多轮辩论收敛）
 
         Args:
             context: 评估上下文，包含目标文本、评估目的、人类评分等
@@ -626,29 +707,97 @@ class JuryEvaluationSystem:
         """
         state = JuryState(context=context)
 
-        print("\n" + "=" * 60)
+        print("\n" + "=" * 80)
         print("🏛️  JURY EVALUATION SYSTEM")
-        print("=" * 60)
+        print("=" * 80)
 
-        # Phase 1: 初评
-        print("\n📊 Phase 1: Initial Evaluation...")
+        # Phase 1: 独立初评
+        print("\n📊 Phase 1: Independent Initial Evaluation...")
         state.evaluations = await self.run_initial_evaluation(context)
         self._print_evaluations(state.evaluations)
 
-        # Phase 2: 检测并执行辩论
-        print("\n⚖️ Phase 2: Checking for disputes...")
-        state.debates = await self.check_and_run_debates(state.evaluations, context)
-        if state.debates:
-            self._print_debates(state.debates)
-            # 更新评估结果（使用辩论后的分数）
-            state.evaluations = self._apply_debate_results(
-                state.evaluations, state.debates
-            )
-        else:
-            print("   No disputes raised. Proceeding to voting.")
+        # Phase 2-3: 多轮辩论循环（队列化顺序辩论）
+        debate_queue = DebateQueue(max_rounds=self.max_debate_rounds)
+        all_debates: List[DebateRecord] = []
+        rounds_without_debates = 0  # 用于提前终止（连续2轮无请求）
 
-        # Phase 3: 准备匿名投票选项
-        print("\n🎭 Phase 3: Preparing Anonymous Voting...")
+        for round_num in range(1, self.max_debate_rounds + 1):
+            print("\n" + "=" * 80)
+            print(f"🔄 DEBATE ROUND {round_num}/{self.max_debate_rounds}")
+            print("=" * 80)
+
+            # 收集本轮辩论请求
+            print("\n🔍 Collecting debate requests from all judges...")
+            debate_requests = await self.collect_debate_requests(
+                state.evaluations,
+                context,
+                debate_queue.processed_pairs,  # 传入已处理对，避免重复
+            )
+
+            if not debate_requests:
+                rounds_without_debates += 1
+                print(f"   ✅ No debate requests in round {round_num}")
+
+                # 连续2轮无请求，提前终止
+                if rounds_without_debates >= 2:
+                    print(
+                        "   🏁 Early termination: No debates for 2 consecutive rounds"
+                    )
+                    break
+
+                # 达到上限也停止
+                if round_num >= self.max_debate_rounds:
+                    print(f"   🏁 Max rounds ({self.max_debate_rounds}) reached")
+                    break
+
+                continue
+
+            # 重置无辩论计数器
+            rounds_without_debates = 0
+
+            # 将请求加入队列
+            total_added = 0
+            for initiator_id, targets in debate_requests.items():
+                for target_info in targets:
+                    added = debate_queue.add_request(
+                        initiator_id,
+                        target_info["target_id"],
+                        target_info["dispute_point"],
+                    )
+                    if added:
+                        total_added += 1
+
+            print(f"   📋 Added {total_added} new debates to queue")
+
+            # FIFO 顺序执行本轮所有辩论
+            print("\n⚖️ Executing Sequential Debates...")
+            round_debates = await self.run_sequential_debates(
+                state.evaluations, context, debate_queue
+            )
+
+            all_debates.extend(round_debates)
+
+            # 应用辩论结果（更新评估分数）
+            if round_debates:
+                state.evaluations = self._apply_debate_results(
+                    state.evaluations, round_debates
+                )
+                print(
+                    f"\n   ✅ Round {round_num} completed: {len(round_debates)} debates"
+                )
+                print("\n   📋 Updated Evaluation Results:")
+                self._print_evaluations(state.evaluations)
+
+        state.debates = all_debates
+
+        if all_debates:
+            print(f"\n📊 Total debates across all rounds: {len(all_debates)}")
+            self._print_debates(all_debates)
+        else:
+            print("\n✅ No debates occurred - all judges in agreement")
+
+        # Phase 4: 准备匿名投票选项
+        print("\n🎭 Phase 4: Preparing Anonymous Voting...")
         state.anonymized_options, state.option_mapping = self._prepare_voting_options(
             state.evaluations, context
         )
@@ -656,22 +805,22 @@ class JuryEvaluationSystem:
             f"   Created {len(state.anonymized_options)} anonymous options for voting."
         )
 
-        # Phase 4: 执行投票（人类通过Studio参与）
-        print("\n🗳️ Phase 4: Anonymous Voting...")
+        # Phase 5: 执行投票（人类通过Studio参与）
+        print("\n🗳️ Phase 5: Anonymous Voting...")
         state.vote_result = await self.run_anonymous_voting(state)
         if state.vote_result:
             print(
                 f"   Winner: {state.vote_result.winner_author} ({state.vote_result.winner_option})"
             )
 
-        # Phase 5: 计算权重和最终分数
-        print("\n📊 Phase 5: Calculating Weighted Score...")
+        # Phase 6: 计算权重和最终分数
+        print("\n📊 Phase 6: Calculating Weighted Score...")
         state.weights = self._calculate_weights(state)
         state.final_score = self._calculate_final_score(state)
         print(f"   Final Weighted Score: {state.final_score:.2f}")
 
-        # Phase 6: 生成最终报告
-        print("\n📝 Phase 6: Generating Final Report...")
+        # Phase 7: 生成最终报告
+        print("\n📝 Phase 7: Generating Final Report...")
         state.final_report = await self.generate_final_report(state)
 
         return state
@@ -680,106 +829,279 @@ class JuryEvaluationSystem:
         self, context: EvaluationContext
     ) -> List[JudgeEvaluation]:
         """
-        Phase 1: 所有法官进行初评
+        Phase 1: 所有法官独立并行初评
 
-        采用顺序评估，后面的法官可以看到前面法官的评估结果
+        所有法官同时进行评估，互相看不到对方的评分，确保评估的独立性和公平性
         """
-        evaluations = []
-        task_prompt = build_evaluation_prompt(context)
+        import asyncio
 
-        # 按顺序让每个法官评估
+        task_prompt = build_evaluation_prompt(context)
         judge_order = ["Logic", "Expression", "Utility", "Moral"]
 
-        for judge_id in judge_order:
+        # 定义单个法官的评估任务
+        async def evaluate_single_judge(judge_id: str) -> JudgeEvaluation:
             judge = self.all_judges[judge_id]
-
-            # 构建包含前序评估的prompt
-            full_prompt = build_evaluation_prompt(context, evaluations)
-
             print(f"   Evaluating with {judge_id}_Judge...")
 
-            # 调用法官
-            response = await judge(Msg("user", full_prompt, "user"))
-
-            # 解析响应
-            content = (
-                response.content if hasattr(response, "content") else str(response)
+            # 调用法官 - 使用结构化输出
+            response = await judge(
+                Msg("user", task_prompt, "user"),
+                structured_model=JudgeOutputModel,
             )
-            parsed = parse_json_from_response(content)
 
-            # 构建评估结果
+            # 从metadata中提取结构化数据
+            parsed = response.metadata if response.metadata else {}
+
+            # 构建评估结果（初评阶段不包含辩论请求）
             eval_result = JudgeEvaluation(
                 judge_id=judge_id,
                 role=parsed.get("role", self.judge_roles.get(judge_id, judge_id)),
                 score=parsed.get("score", 50),
                 reason=parsed.get("reason", "No reason provided"),
                 metadata=parsed,
-                dispute_to=parsed.get("dispute_to"),
-                dispute_point=parsed.get("dispute_point"),
+                dispute_to=None,  # 初评阶段不发起辩论
+                dispute_point=None,
             )
 
-            evaluations.append(eval_result)
             print(f"      → Score: {eval_result.score}")
+            return eval_result
 
-        return evaluations
+        # 并行执行所有法官的评估
+        evaluation_tasks = [evaluate_single_judge(jid) for jid in judge_order]
+        evaluations = await asyncio.gather(*evaluation_tasks)
 
-    async def check_and_run_debates(
-        self, evaluations: List[JudgeEvaluation], context: EvaluationContext
-    ) -> List[DebateRecord]:
+        return list(evaluations)
+
+    async def collect_debate_requests(
+        self,
+        evaluations: List[JudgeEvaluation],
+        context: EvaluationContext,
+        processed_pairs: Optional[Set[Tuple[str, str]]] = None,
+    ) -> Dict[str, List[Dict[str, str]]]:
         """
-        Phase 2: 检查辩论请求并执行辩论
+        Phase 2: 展示所有评估结果，收集辩论请求
 
-        每对法官只辩论一次，辩论只进行1轮
+        让每个法官看到其他3个法官的评分和理由，然后决定是否要发起辩论
+
+        Args:
+            evaluations: 当前评估结果
+            context: 评估上下文
+            processed_pairs: 已完成的辩论对（用于去重，避免重复辩论）
+
+        Returns:
+            Dict mapping initiator_id -> [{"target_id": str, "dispute_point": str}, ...]
+            例如: {"Logic": [{"target_id": "Expression", "dispute_point": "..."}], ...}
         """
-        debates = []
-        processed_pairs = set()
+        import asyncio
 
-        for eval in evaluations:
-            if eval.dispute_to and eval.dispute_point:
-                # 规范化目标ID
-                target_id = eval.dispute_to
-                # 处理可能的格式问题（如 "Expression Judge" -> "Expression"）
+        if processed_pairs is None:
+            processed_pairs = set()
+
+        debate_requests = {}
+
+        # 构建辩论请求的prompt
+        def build_debate_request_prompt(my_judge_id: str) -> str:
+            my_eval = next(e for e in evaluations if e.judge_id == my_judge_id)
+
+            # Show other 3 judges' evaluations
+            others_text = []
+            for eval in evaluations:
+                if eval.judge_id != my_judge_id:
+                    others_text.append(
+                        f"- **{eval.role} ({eval.judge_id})**: {eval.score} points\n"
+                        f"  Reason: {eval.reason}"
+                    )
+
+            return f"""# Review Other Judges' Evaluations
+
+## Your Initial Evaluation
+- Role: {my_eval.role}
+- Score: {my_eval.score} points
+- Reason: {my_eval.reason}
+
+## Other Judges' Evaluations
+{chr(10).join(others_text)}
+
+## Task
+Please carefully review the evaluations from other judges. If you have significant disagreements (e.g., large score difference, conflicting basic reasoning, obvious oversight in evaluation perspective), you can request a debate with that judge.
+
+You can initiate debate requests with multiple judges, or none at all. If you agree with all other judges' evaluations, simply provide an empty list.
+
+## Required Output Fields
+The system will guide you to provide structured output. You must include:
+- debate_requests: A list of debate requests. Each request should contain:
+  - target_judge: The judge ID you want to debate with (e.g., "Logic", "Expression", "Utility", "Moral")
+  - dispute_point: Your specific point of disagreement
+
+If you have no objections, provide an empty debate_requests list.
+"""
+
+        # 并行收集所有法官的辩论请求
+        async def get_judge_debate_requests(judge_id: str):
+            judge = self.all_judges[judge_id]
+            prompt = build_debate_request_prompt(judge_id)
+
+            print(f"   {judge_id} reviewing other judges' evaluations...")
+
+            response = await judge(
+                Msg("user", prompt, "user"),
+                structured_model=DebateRequestModel,
+            )
+
+            parsed = response.metadata if response.metadata else {}
+            requests = parsed.get("debate_requests", [])
+
+            # 提取并规范化目标法官（添加去重检查）
+            targets = []
+            for req in requests:
+                target = req.get("target_judge", "")
+                # 规范化目标名称
                 for key in self.all_judges.keys():
-                    if key.lower() in target_id.lower():
-                        target_id = key
+                    if key.lower() in target.lower():
+                        # 检查是否已处理过这对
+                        sorted_pair = sorted([judge_id, key])
+                        pair: Tuple[str, str] = (sorted_pair[0], sorted_pair[1])
+                        if pair not in processed_pairs:
+                            targets.append(
+                                {
+                                    "target_id": key,
+                                    "dispute_point": req.get("dispute_point", ""),
+                                }
+                            )
                         break
 
-                # 检查目标是否有效
-                if target_id not in self.all_judges:
-                    print(f"   ⚠️ Invalid dispute target: {eval.dispute_to}")
-                    continue
+            return judge_id, targets
 
-                # 检查是否已处理过这对
-                pair_key = tuple(sorted([eval.judge_id, target_id]))
-                if pair_key in processed_pairs:
-                    continue
+        # 并行收集所有法官的请求
+        judge_order = ["Logic", "Expression", "Utility", "Moral"]
+        request_tasks = [get_judge_debate_requests(jid) for jid in judge_order]
+        results = await asyncio.gather(*request_tasks)
 
-                print(f"   🔥 Debate: {eval.judge_id} vs {target_id}")
-                print(f"      Point: {eval.dispute_point[:80]}...")
-
-                # 获取目标评估
-                target_eval = next(
-                    (e for e in evaluations if e.judge_id == target_id), None
+        # 构建辩论请求字典
+        for judge_id, targets in results:
+            if targets:
+                debate_requests[judge_id] = targets
+                target_names = [t["target_id"] for t in targets]
+                print(
+                    f"   🔥 {judge_id} requests debate with: {', '.join(target_names)}"
                 )
 
-                if not target_eval:
-                    continue
+        if not debate_requests:
+            print("   ✅ All judges have no objections")
 
-                # 执行辩论
-                debate_record = await self._run_single_debate(
-                    initiator_id=eval.judge_id,
-                    initiator_score=eval.score,
-                    initiator_reason=eval.reason,
-                    target_id=target_id,
-                    target_score=target_eval.score,
-                    target_reason=target_eval.reason,
-                    dispute_point=eval.dispute_point,
+        return debate_requests
+
+    async def run_sequential_debates(
+        self,
+        evaluations: List[JudgeEvaluation],
+        context: EvaluationContext,
+        debate_queue: DebateQueue,
+    ) -> List[DebateRecord]:
+        """
+        Phase 3: 顺序执行辩论队列（FIFO，非并发）
+
+        设计理念：
+        - FIFO 顺序：先请求的辩论先执行
+        - 非并发：每次只执行一场辩论，确保分数更新可被后续辩论看到
+        - 自动去重：通过 DebateQueue 管理
+
+        Args:
+            evaluations: 当前评估结果（会被动态更新）
+            context: 评估上下文
+            debate_queue: 辩论队列管理器
+
+        Returns:
+            本轮完成的辩论记录列表
+        """
+        debates: List[DebateRecord] = []
+        total_debates = debate_queue.pending_count()
+
+        if total_debates == 0:
+            return debates
+
+        print(f"   📋 Queue: {total_debates} debates pending")
+
+        debate_num = 0
+        while True:
+            next_debate = debate_queue.get_next_debate()
+            if not next_debate:
+                break
+
+            debate_num += 1
+            initiator_id, target_id, dispute_point = next_debate
+
+            print(
+                f"\n   🔥 [{debate_num}/{total_debates}] Debate: {initiator_id} vs {target_id}"
+            )
+            print(f"      Dispute: {dispute_point[:80]}...")
+
+            # 获取最新评估分数（可能被之前的辩论更新）
+            initiator_eval = next(e for e in evaluations if e.judge_id == initiator_id)
+            target_eval = next(e for e in evaluations if e.judge_id == target_id)
+
+            print(
+                f"      Current scores: {initiator_id}={initiator_eval.score}, "
+                f"{target_id}={target_eval.score}"
+            )
+
+            # 执行辩论
+            debate_record = await self._run_single_debate(
+                initiator_id=initiator_id,
+                initiator_score=initiator_eval.score,
+                initiator_reason=initiator_eval.reason,
+                target_id=target_id,
+                target_score=target_eval.score,
+                target_reason=target_eval.reason,
+                dispute_point=dispute_point,
+            )
+
+            if debate_record:
+                debates.append(debate_record)
+                debate_queue.mark_completed(initiator_id, target_id)
+
+                # 打印结果（带变化标记）
+                init_change = (
+                    debate_record.initiator_new_score
+                    - debate_record.initiator_original_score
+                )
+                target_change = (
+                    debate_record.target_new_score - debate_record.target_original_score
                 )
 
-                if debate_record:
-                    debates.append(debate_record)
-                    processed_pairs.add(pair_key)
+                init_status = (
+                    "unchanged"
+                    if debate_record.initiator_kept_original
+                    else f"{init_change:+d}"
+                )
+                target_status = (
+                    "unchanged"
+                    if debate_record.target_kept_original
+                    else f"{target_change:+d}"
+                )
 
+                print(
+                    f"      Result: {initiator_id} {debate_record.initiator_original_score}→"
+                    f"{debate_record.initiator_new_score} ({init_status}), "
+                    f"{target_id} {debate_record.target_original_score}→"
+                    f"{debate_record.target_new_score} ({target_status})"
+                )
+
+                # 立即更新 evaluations（让后续辩论看到最新分数）
+                for eval in evaluations:
+                    if (
+                        eval.judge_id == initiator_id
+                        and not debate_record.initiator_kept_original
+                    ):
+                        eval.score = debate_record.initiator_new_score
+                        eval.reason = debate_record.initiator_new_reason
+                    elif (
+                        eval.judge_id == target_id
+                        and not debate_record.target_kept_original
+                    ):
+                        eval.score = debate_record.target_new_score
+                        eval.reason = debate_record.target_new_reason
+
+        print(f"\n   ✅ Completed {len(debates)} debates in this round")
         return debates
 
     async def _run_single_debate(
@@ -839,23 +1161,19 @@ class JuryEvaluationSystem:
 
         # 发起方先陈述
         async with MsgHub(participants=[initiator, target]) as hub:
-            # 发起方陈述
-            init_response = await initiator(Msg("user", initiator_prompt, "user"))
-            init_content = (
-                init_response.content
-                if hasattr(init_response, "content")
-                else str(init_response)
+            # 发起方陈述 - 使用结构化输出
+            init_response = await initiator(
+                Msg("user", initiator_prompt, "user"),
+                structured_model=DebateOutputModel,
             )
-            init_parsed = parse_json_from_response(init_content)
+            init_parsed = init_response.metadata if init_response.metadata else {}
 
-            # 目标方回应
-            target_response = await target(Msg("user", target_prompt, "user"))
-            target_content = (
-                target_response.content
-                if hasattr(target_response, "content")
-                else str(target_response)
+            # 目标方回应 - 使用结构化输出
+            target_response = await target(
+                Msg("user", target_prompt, "user"),
+                structured_model=DebateOutputModel,
             )
-            target_parsed = parse_json_from_response(target_content)
+            target_parsed = target_response.metadata if target_response.metadata else {}
 
         # 更新辩论记录
         debate_record.initiator_new_score = init_parsed.get(
@@ -1028,15 +1346,15 @@ Note: You cannot vote for your own option.
 
 {options_for_judge}
 
-Please output your vote in JSON format:
-{{"vote": "Option X", "reason": "Brief explanation of your choice"}}
+Provide your vote (e.g., "Option 1") and a brief reason for your choice.
 """
 
-            response = await judge(Msg("user", judge_vote_prompt, "user"))
-            content = (
-                response.content if hasattr(response, "content") else str(response)
+            # 使用结构化输出
+            response = await judge(
+                Msg("user", judge_vote_prompt, "user"),
+                structured_model=VoteOutputModel,
             )
-            parsed = parse_json_from_response(content)
+            parsed = response.metadata if response.metadata else {}
 
             vote = parsed.get("vote", "")
             vote = self._normalize_vote(vote, available_options.keys())
@@ -1139,9 +1457,9 @@ Please output your vote in JSON format:
         return total_weighted / total_weight
 
     async def generate_final_report(self, state: JuryState) -> str:
-        """Phase 6: 生成最终报告"""
+        """Phase 7: 生成最终报告（包含完整辩论历史）"""
 
-        # 构建报告生成prompt
+        # 构建评估结果摘要
         evaluations_text = "\n".join(
             [
                 f"- {eval.role}: {eval.score}/100\n  Reason: {eval.reason}"
@@ -1149,18 +1467,34 @@ Please output your vote in JSON format:
             ]
         )
 
+        # 构建详细的辩论历史
         debates_text = "No debates occurred."
         if state.debates:
             debates_parts = []
-            for debate in state.debates:
-                debates_parts.append(f"""
-Debate: {debate.initiator_id} vs {debate.target_id}
-Dispute Point: {debate.dispute_point}
-Summary: {debate.summary}
-Result: 
-  - {debate.initiator_id}: {debate.initiator_original_score} → {debate.initiator_new_score} (kept_original: {debate.initiator_kept_original})
-  - {debate.target_id}: {debate.target_original_score} → {debate.target_new_score} (kept_original: {debate.target_kept_original})
-""")
+            for i, debate in enumerate(state.debates, 1):
+                debate_section = f"""
+### Debate {i}: {debate.initiator_id} vs {debate.target_id}
+
+**Dispute Point:** {debate.dispute_point}
+
+**{debate.initiator_id} (Initiator):**
+- Original Score: {debate.initiator_original_score}
+- New Score: {debate.initiator_new_score}
+- Score Changed: {"Yes" if not debate.initiator_kept_original else "No"}
+- Updated Reasoning: {debate.initiator_new_reason[:300]}{"..." if len(debate.initiator_new_reason) > 300 else ""}
+
+**{debate.target_id} (Respondent):**
+- Original Score: {debate.target_original_score}
+- New Score: {debate.target_new_score}
+- Score Changed: {"Yes" if not debate.target_kept_original else "No"}
+- Updated Reasoning: {debate.target_new_reason[:300]}{"..." if len(debate.target_new_reason) > 300 else ""}
+
+**Debate Outcome:**
+- {debate.initiator_id}: {debate.initiator_original_score} → {debate.initiator_new_score} ({"+" if debate.initiator_new_score > debate.initiator_original_score else ""}{debate.initiator_new_score - debate.initiator_original_score})
+- {debate.target_id}: {debate.target_original_score} → {debate.target_new_score} ({"+" if debate.target_new_score > debate.target_original_score else ""}{debate.target_new_score - debate.target_original_score})
+"""
+                debates_parts.append(debate_section)
+
             debates_text = "\n".join(debates_parts)
 
         votes_text = "No voting results."
@@ -1187,7 +1521,7 @@ Please generate a comprehensive final evaluation report (in Markdown format) bas
 ## Evaluation Criteria
 {state.context.evaluation_rubrics if state.context.evaluation_rubrics else "Using each judge's internal criteria"}
 
-## AI Judge Evaluation Results
+## AI Judge Final Evaluation Results (After Debates)
 {evaluations_text}
 
 ## Human Evaluation
@@ -1195,7 +1529,7 @@ Please generate a comprehensive final evaluation report (in Markdown format) bas
 - Reason: {state.context.human_reason}
 - Competency Score: {state.context.human_competency_score}
 
-## Debate Records
+## Debate Records (Detailed)
 {debates_text}
 
 ## Voting Results
@@ -1212,7 +1546,10 @@ Please generate a comprehensive final evaluation report (in Markdown format) bas
 Please generate a report containing the following sections:
 1. **Executive Summary**: Final score + core conclusion (one sentence)
 2. **Dimension Breakdown**: Analysis by dimension (Logic/Expression/Utility/Ethics)
-3. **Controversy Highlights**: Key points of contention (if debates occurred)
+3. **Controversy Highlights**: Key points of contention and debate outcomes (if debates occurred)
+   - Summarize what each debate was about
+   - Explain how judges changed (or didn't change) their positions
+   - Highlight any consensus or persistent disagreements
 4. **Uncertainty Notes**: Uncertainty declaration
 5. **Recommendations**: Improvement suggestions
 
@@ -1241,15 +1578,50 @@ Please output the report directly in Markdown format.
         print("\n   📋 Evaluation Results:")
         for eval in evaluations:
             print(f"   - {eval.role}: {eval.score}/100")
+
+            # 显示额外的metadata（如果存在）
+            extra = eval.metadata.get("extra_metadata", {})
+            if extra:
+                extra_items = []
+                for k, v in extra.items():
+                    if isinstance(v, list) and not v:  # 空列表
+                        continue
+                    extra_items.append(f"{k}: {v}")
+                if extra_items:
+                    print(f"     ({', '.join(extra_items)})")
+
             if eval.dispute_to:
                 print(f"     ⚔️ Disputes: {eval.dispute_to}")
 
     def _print_debates(self, debates: List[DebateRecord]):
-        """打印辩论记录"""
-        print(f"\n   ⚖️ {len(debates)} debate(s) occurred:")
-        for debate in debates:
-            print(f"   - {debate.initiator_id} vs {debate.target_id}")
-            print(f"     Summary: {debate.summary[:80]}...")
+        """打印辩论记录摘要"""
+        if not debates:
+            return
+
+        print(f"\n   ⚖️ Debate Summary: {len(debates)} debate(s) occurred")
+        for i, debate in enumerate(debates, 1):
+            init_change = debate.initiator_new_score - debate.initiator_original_score
+            target_change = debate.target_new_score - debate.target_original_score
+
+            init_status = (
+                "kept"
+                if debate.initiator_kept_original
+                else f"changed {init_change:+d}"
+            )
+            target_status = (
+                "kept" if debate.target_kept_original else f"changed {target_change:+d}"
+            )
+
+            print(f"   [{i}] {debate.initiator_id} vs {debate.target_id}")
+            print(
+                f"       {debate.initiator_id}: {debate.initiator_original_score}→"
+                f"{debate.initiator_new_score} ({init_status})"
+            )
+            print(
+                f"       {debate.target_id}: {debate.target_original_score}→"
+                f"{debate.target_new_score} ({target_status})"
+            )
+            print(f"       Dispute: {debate.dispute_point[:60]}...")
 
 
 # ============================================================================
@@ -1277,7 +1649,6 @@ def create_jury_system(config_path: Optional[str] = None) -> JuryEvaluationSyste
         config = {
             "judge_model": model_config.get_judge_model(),
             "system_settings": {
-                "debate_threshold": 15,
                 "max_debate_rounds": 1,
             },
         }
@@ -1314,7 +1685,6 @@ async def run_evaluation(
         config = {
             "judge_model": model_config.get_judge_model(),
             "system_settings": {
-                "debate_threshold": 15,
                 "max_debate_rounds": 1,
             },
         }
@@ -1353,7 +1723,6 @@ if __name__ == "__main__":
         config = {
             "judge_model": model_config.get_judge_model(),
             "system_settings": {
-                "debate_threshold": 15,
                 "max_debate_rounds": 1,
             },
         }

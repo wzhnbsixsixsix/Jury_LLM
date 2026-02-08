@@ -43,7 +43,7 @@ class ModelConfig:
     _initialized = False
 
     # Default fallback model if all else fails
-    DEFAULT_FALLBACK_MODEL = "qwen-max"
+    DEFAULT_FALLBACK_MODEL = "qwq-plus"
 
     def __new__(cls):
         """Implement singleton pattern."""

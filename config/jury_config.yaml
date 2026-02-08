@@ -8,40 +8,43 @@
 # ============================================================================
 # 为每个评委角色指定独立的模型
 judge_models:
-  chief: "qwen-turbo"        # 首席法官
-  logic: "qwen-turbo"        # 逻辑评委
-  expression: "qwen-turbo"   # 表达评委
-  utility: "qwen-turbo"      # 实用评委
-  moral: "qwen-turbo"        # 道德评委
+  chief: "qvq-plus"        # 首席法官
+  logic: "qvq-plus"        # 逻辑评委
+  expression: "qvq-plus"   # 表达评委
+  utility: "qvq-plus"      # 实用评委
+  moral: "qvq-plus"        # 道德评委
 
 # ============================================================================
 # 方式 2: 按索引配置（向后兼容，如果 judge_models 未配置则使用）
 # ============================================================================
-judge_model: "qwen-turbo"  # 首席法官模型（legacy）
+judge_model: "qvq-plus"  # 首席法官模型（legacy）
 
+';'
 jury_models:  # 按顺序：logic, expression, utility, moral
-  - "qwen-turbo"      # 逻辑评委
-  - "qwen-turbo"      # 表达评委
-  - "qwen-turbo"      # 实用评委
-  - "qwen-turbo"      # 道德评委
+  - "qvq-plus"      # 逻辑评委
+  - "qvq-plus"      # 表达评委
+  - "qvq-plus"      # 实用评委
+  - "qvq-plus"      # 道德评委
 
 # ============================================================================
 # 系统设置
 # ============================================================================
 system_settings:
-  debate_threshold: 15      # 触发辩论的分数差异阈值
-  turbo_debate_rounds: 2      # 最大辩论轮次
+  debate_threshold: 15      # [已废弃] 原分数差异阈值，现由法官自主决定是否发起辩论
+  plus_debate_rounds: 2      # 最大辩论轮次（建议2-3）
+                            # 每轮结束后重新收集请求，连续2轮无请求则提前终止
+                            # 辩论采用FIFO队列顺序执行，非并发
 
 # ============================================================================
 # 模型配置设置（可选）
 # ============================================================================
 model_settings:
   # 默认模型（当未指定角色时使用），step2和step2.5都是用的这个
-  default_model: "qwen-turbo"
+  default_model: "qvq-plus"
   
   # 提供商特定的模型映射（可选）
   # 用于快速切换不同 AI 提供商
   # provider_models:
   #   openrouter: "anthropic/claude-3.5-sonnet"
-  #   dashscope: "qwen-turbo"
+  #   dashscope: "qvq-plus"
   #   openai: "gpt-4"
